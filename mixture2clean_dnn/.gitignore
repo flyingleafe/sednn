@@ -4,4 +4,4 @@ workspace
 pesq_dir
 pesq
 *.pyc
-
+_pesq*.txt
