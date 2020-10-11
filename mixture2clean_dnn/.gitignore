@@ -5,3 +5,4 @@ pesq_dir
 pesq
 *.pyc
 _pesq*.txt
+_pesq*.csv

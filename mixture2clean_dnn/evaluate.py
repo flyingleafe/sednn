@@ -8,9 +8,12 @@ import argparse
 import os
 import csv
 import numpy as np
+import pandas as pd
+import soundfile as sf
 import pickle
 import matplotlib.pyplot as plt
 
+from pypesq import pesq
 
 def plot_training_stat(args):
     """Plot training and testing loss.
@@ -62,9 +65,7 @@ def calculate_pesq(args):
     speech_dir = args.speech_dir
     te_snr = args.te_snr
 
-    # Remove already existed file.
-    os.system('rm _pesq_itu_results.txt')
-    os.system('rm _pesq_results.txt')
+    df = pd.DataFrame(columns=['filepath', 'pesq'])
 
     # Calculate PESQ of all enhaced speech.
     enh_speech_dir = os.path.join(workspace, "enh_wavs", "test", "%ddb" % int(te_snr))
@@ -76,24 +77,30 @@ def calculate_pesq(args):
         speech_na = na.split('.')[0]
         speech_path = os.path.join(speech_dir, "%s.WAV" % speech_na)
 
-        # Call executable PESQ tool.
-        cmd = ' '.join(["./pesq", speech_path, enh_path, "+16000"])
-        os.system(cmd)
+        ref, sr = sf.read(speech_path)
+        deg, sr = sf.read(enh_path)
+        assert sr == 16000
 
+        if len(ref) < len(deg):
+            ref = np.pad(ref, (0, len(deg) - len(ref)))
+        elif len(deg) < len(ref):
+            deg = np.pad(deg, (0, len(ref) - len(deg)))
+
+        score = pesq(ref, deg, sr)
+
+        df.loc[len(df)] = [na, score]
+
+    df.to_csv('_pesq_results.csv', index=False)
 
 def get_stats(args):
     """Calculate stats of PESQ.
     """
-    pesq_path = "_pesq_results.txt"
-    with open(pesq_path, 'rb') as f:
-        reader = csv.reader(f, delimiter='\t')
-        lis = list(reader)
+    df = pd.read_csv('_pesq_results.csv')
 
     pesq_dict = {}
-    for i1 in range(1, len(lis) - 1):
-        li = lis[i1]
-        na = li[0]
-        pesq = float(li[1])
+    for idx, row in df.iterrows():
+        na = row[0]
+        pesq = float(row[1])
         noise_type = na.split('.')[1]
         if noise_type not in pesq_dict.keys():
             pesq_dict[noise_type] = [pesq]
