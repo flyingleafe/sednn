@@ -14,11 +14,15 @@ import matplotlib.pyplot as plt
 from scipy import signal
 import pickle
 import h5py
+import librosa
 from sklearn import preprocessing
+from pathlib import PurePath
+from tqdm import tqdm
 
 import prepare_data as pp_data
 import config as cfg
 
+from utils import wav_paths, all_file_paths
 
 def create_folder(fd):
     if not os.path.exists(fd):
@@ -36,6 +40,8 @@ def read_audio(path, target_fs=None):
 def write_audio(path, audio, sample_rate):
     soundfile.write(file=path, data=audio, samplerate=sample_rate)
 
+
+    
 ###
 def create_mixture_csv(args):
     """Create csv containing mixture information.
@@ -55,22 +61,33 @@ def create_mixture_csv(args):
     speech_dir = args.speech_dir
     noise_dir = args.noise_dir
     data_type = args.data_type
+    speech_percent = args.speech_percent
     magnification = args.magnification
+    force = args.force
     fs = cfg.sample_rate
 
-    speech_names = [na for na in os.listdir(speech_dir) if na.lower().endswith(".wav")]
-    noise_names = [na for na in os.listdir(noise_dir) if na.lower().endswith(".wav")]
+    out_csv_path = os.path.join(workspace, "mixture_csvs", "%s.csv" % data_type)
+    
+    if os.path.isfile(out_csv_path) and not force:
+        print(f'Mixture CSV {out_csv_path} already exists')
+        return
+    
+    speech_names = wav_paths(speech_dir)
+    if speech_percent < 100:
+        n_speechs = int(len(speech_names) * speech_percent / 100)
+        speech_names = speech_names[:n_speechs]
+        
+    noise_names = wav_paths(noise_dir)
 
     rs = np.random.RandomState(0)
-    out_csv_path = os.path.join(workspace, "mixture_csvs", "%s.csv" % data_type)
     pp_data.create_folder(os.path.dirname(out_csv_path))
 
     cnt = 0
     f = open(out_csv_path, 'w')
     f.write("%s\t%s\t%s\t%s\n" % ("speech_name", "noise_name", "noise_onset", "noise_offset"))
-    for speech_na in speech_names:
+    for speech_path in tqdm(speech_names, f'Creating mixture CSV ({data_type})'):
         # Read speech.
-        speech_path = os.path.join(speech_dir, speech_na)
+        speech_na = str(PurePath(speech_path).relative_to(speech_dir))
         (speech_audio, _) = read_audio(speech_path)
         len_speech = len(speech_audio)
 
@@ -84,25 +101,23 @@ def create_mixture_csv(args):
             raise Exception("data_type must be train | test!")
 
         # Mix one speech with different noises many times.
-        for noise_na in selected_noise_names:
-            noise_path = os.path.join(noise_dir, noise_na)
+        for noise_path in selected_noise_names:
+            noise_na = str(PurePath(noise_path).relative_to(noise_dir))
+            #noise_path = os.path.join(noise_dir, noise_na)
             (noise_audio, _) = read_audio(noise_path)
 
             len_noise = len(noise_audio)
 
             if len_noise <= len_speech:
                 noise_onset = 0
-                nosie_offset = len_speech
+                noise_offset = len_speech
             # If noise longer than speech then randomly select a segment of noise.
             else:
                 noise_onset = rs.randint(0, len_noise - len_speech, size=1)[0]
-                nosie_offset = noise_onset + len_speech
-
-            if cnt % 100 == 0:
-                print(cnt)
+                noise_offset = noise_onset + len_speech
 
             cnt += 1
-            f.write("%s\t%s\t%d\t%d\n" % (speech_na, noise_na, noise_onset, nosie_offset))
+            f.write("%s\t%s\t%d\t%d\n" % (speech_na, noise_na, noise_onset, noise_offset))
     f.close()
     print(out_csv_path)
     print("Create %s mixture csv finished!" % data_type)
@@ -124,6 +139,7 @@ def calculate_mixture_features(args):
     noise_dir = args.noise_dir
     data_type = args.data_type
     snr = args.snr
+    force = args.force
     fs = cfg.sample_rate
 
     # Open mixture csv.
@@ -132,30 +148,60 @@ def calculate_mixture_features(args):
         reader = csv.reader(f, delimiter='\t')
         lis = list(reader)
 
-    t1 = time.time()
-    cnt = 0
-    for i1 in range(1, len(lis)):
+    noise_cache = {}
+    for i1 in tqdm(range(1, len(lis)), f'Calculating mixture features ({data_type})'):
         [speech_na, noise_na, noise_onset, noise_offset] = lis[i1]
         noise_onset = int(noise_onset)
         noise_offset = int(noise_offset)
 
-        # Read speech audio.
+        # Construct the output paths and see if the features/mixed audio are already computed
         speech_path = os.path.join(speech_dir, speech_na)
-        (speech_audio, _) = read_audio(speech_path, target_fs=fs)
-
-        # Read noise audio.
         noise_path = os.path.join(noise_dir, noise_na)
-        (noise_audio, _) = read_audio(noise_path, target_fs=fs)
+
+        out_bare_na = os.path.join("%s.%s" %
+            (os.path.splitext(speech_na)[0], os.path.splitext(noise_na)[0]))
+        out_audio_path = os.path.join(workspace, "mixed_audios", "spectrogram",
+            data_type, "%ddb" % int(snr), "%s.wav" % out_bare_na)
+        
+        out_feat_path = os.path.join(workspace, "features", "spectrogram",
+            data_type, "%ddb" % int(snr), "%s.p" % out_bare_na)
+        
+        if os.path.isfile(out_audio_path) and os.path.isfile(out_feat_path) and not force:
+            print(f'Mixed audio {out_audio_path} and its features are already computed')
+            continue
+        
+        # Read speech audio and noise audio
+        (speech_audio, _) = read_audio(speech_path, target_fs=fs)
+        
+        try:
+            noise_audio = noise_cache[noise_path]
+        except KeyError:
+            (noise_audio, _) = read_audio(noise_path, target_fs=fs)
+            noise_cache[noise_path] = noise_audio
 
         # Repeat noise to the same length as speech.
+        orig_noise_len = len(noise_audio)
         if len(noise_audio) < len(speech_audio):
             n_repeat = int(np.ceil(float(len(speech_audio)) / float(len(noise_audio))))
             noise_audio_ex = np.tile(noise_audio, n_repeat)
             noise_audio = noise_audio_ex[0 : len(speech_audio)]
         # Truncate noise to the same length as speech.
         else:
-            noise_audio = noise_audio[noise_onset : noise_offset]
-
+            if noise_offset - noise_onset == len(speech_audio):       # a hacky workaround around a weird bug
+                if noise_offset > len(noise_audio):
+                    dif = noise_offset - len(noise_audio)
+                    noise_offset -= dif
+                    noise_onset -= dif
+                    
+                noise_audio = noise_audio[noise_onset : noise_offset]
+            else:
+                noise_audio = noise_audio[:len(speech_audio)]
+                
+        if len(noise_audio) != len(speech_audio):
+            print("noise len {}, orig {}, speech len {}".format(len(noise_audio), orig_noise_len, len(speech_audio)))
+            print("onset {}, offset {}".format(noise_onset, noise_offset))
+            raise ValueError("Stupid lenghts!")
+            
         # Scale speech to given snr.
         scaler = get_amplitude_scaling_factor(speech_audio, noise_audio, snr=snr)
         speech_audio *= scaler
@@ -164,10 +210,6 @@ def calculate_mixture_features(args):
         (mixed_audio, speech_audio, noise_audio, alpha) = additive_mixing(speech_audio, noise_audio)
 
         # Write out mixed audio.
-        out_bare_na = os.path.join("%s.%s" %
-            (os.path.splitext(speech_na)[0], os.path.splitext(noise_na)[0]))
-        out_audio_path = os.path.join(workspace, "mixed_audios", "spectrogram",
-            data_type, "%ddb" % int(snr), "%s.wav" % out_bare_na)
         create_folder(os.path.dirname(out_audio_path))
         write_audio(out_audio_path, mixed_audio, fs)
 
@@ -177,19 +219,9 @@ def calculate_mixture_features(args):
         noise_x = calc_sp(noise_audio, mode='magnitude')
 
         # Write out features.
-        out_feat_path = os.path.join(workspace, "features", "spectrogram",
-            data_type, "%ddb" % int(snr), "%s.p" % out_bare_na)
         create_folder(os.path.dirname(out_feat_path))
         data = [mixed_complx_x, speech_x, noise_x, alpha, out_bare_na]
         pickle.dump(data, open(out_feat_path, 'wb'), protocol=pickle.HIGHEST_PROTOCOL)
-
-        # Print.
-        if cnt % 100 == 0:
-            print(cnt)
-
-        cnt += 1
-
-    print("Extracting feature time: %s" % (time.time() - t1))
 
 def rms(y):
     """Root mean square.
@@ -280,52 +312,67 @@ def pack_features(args):
     snr = args.snr
     n_concat = args.n_concat
     n_hop = args.n_hop
+    force = args.force
 
+    out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "data.h5")
+    if os.path.isfile(out_path) and not force:
+        print(f'Packed features file {out_path} is already made')
+        return
+    
     x_all = []  # (n_segs, n_concat, n_freq)
     y_all = []  # (n_segs, n_freq)
 
-    cnt = 0
     t1 = time.time()
 
     # Load all features.
     feat_dir = os.path.join(workspace, "features", "spectrogram", data_type, "%ddb" % int(snr))
-    names = os.listdir(feat_dir)
-    for na in names:
+    feat_paths = all_file_paths(feat_dir)
+    
+    # Read the spectrograms and count their lengths to pre-allocate arrays
+    n_segs = 0
+    for feat_path in tqdm(feat_paths, 'Reading features first time (segments lenghts estimation)'):
+        data = pickle.load(open(feat_path, 'rb'))
+        [mixed_complx_x, _, _, _, _] = data
+        sgs = (mixed_complx_x.shape[0] + n_concat - 1) // n_hop
+        n_segs += sgs
+        
+    print(f'Upper estimate for the number of segmens: {n_segs}')
+    
+    n_freq = cfg.n_window // 2 + 1
+    x_all = np.zeros((n_segs, n_concat, n_freq), dtype=np.float32)
+    y_all = np.zeros((n_segs, n_freq), dtype=np.float32)
+    
+    count_segs = 0
+    for feat_path in tqdm(feat_paths, 'Packing features'):
         # Load feature.
-        feat_path = os.path.join(feat_dir, na)
+        na = str(PurePath(feat_path).relative_to(feat_dir))
         data = pickle.load(open(feat_path, 'rb'))
         [mixed_complx_x, speech_x, noise_x, alpha, na] = data
         mixed_x = np.abs(mixed_complx_x)
 
-        # Pad start and finish of the spectrogram with boarder values.
+        # Pad start and finish of the spectrogram with border values.
         n_pad = (n_concat - 1) // 2
         mixed_x = pad_with_border(mixed_x, n_pad)
         speech_x = pad_with_border(speech_x, n_pad)
 
         # Cut input spectrogram to 3D segments with n_concat.
         mixed_x_3d = mat_2d_to_3d(mixed_x, agg_num=n_concat, hop=n_hop)
-        x_all.append(mixed_x_3d)
+        x = log_sp(mixed_x_3d).astype(np.float32)
+        x_all[count_segs:count_segs+len(x), :, :] = x
 
         # Cut target spectrogram and take the center frame of each 3D segment.
         speech_x_3d = mat_2d_to_3d(speech_x, agg_num=n_concat, hop=n_hop)
         y = speech_x_3d[:, n_pad, :]
-        y_all.append(y)
+        y = log_sp(y).astype(np.float32)
+        y_all[count_segs:count_segs+len(y), :] = y
 
-        # Print.
-        if cnt % 100 == 0:
-            print(cnt)
+        assert len(x) == len(y)
+        count_segs += len(x)
 
-        # if cnt == 3: break
-        cnt += 1
-
-    x_all = np.concatenate(x_all, axis=0)   # (n_segs, n_concat, n_freq)
-    y_all = np.concatenate(y_all, axis=0)   # (n_segs, n_freq)
-
-    x_all = log_sp(x_all).astype(np.float32)
-    y_all = log_sp(y_all).astype(np.float32)
+    x_all = x_all[:count_segs]
+    y_all = y_all[:count_segs]
 
     # Write out data to .h5 file.
-    out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "data.h5")
     create_folder(os.path.dirname(out_path))
     with h5py.File(out_path, 'w') as hf:
         hf.create_dataset('x', data=x_all)
@@ -358,18 +405,25 @@ def pad_with_border(x, n_pad):
     """Pad the begin and finish of spectrogram with border frame value.
     """
     n_pad = int(n_pad)
-    x_pad_list = [x[0:1]] * n_pad + [x] + [x[-1:]] * n_pad
-    return np.concatenate(x_pad_list, axis=0)
+    return np.pad(x, ((n_pad, n_pad), (0, 0)), mode='edge')
+    
 
-###
 def compute_scaler(args):
     """Compute and write out scaler of data.
     """
     workspace = args.workspace
     data_type = args.data_type
+    force = args.force
     snr = args.snr
 
+    # Check if already computed
+    out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "scaler.p")
+    if os.path.isfile(out_path) and not force:
+        print(f'Scaler for {data_type} is already computed')
+        return
+    
     # Load data.
+    print(f'Computing scaler {data_type}')
     t1 = time.time()
     hdf5_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "data.h5")
     with h5py.File(hdf5_path, 'r') as hf:
@@ -384,7 +438,6 @@ def compute_scaler(args):
     print(scaler.scale_)
 
     # Write out scaler.
-    out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "scaler.p")
     create_folder(os.path.dirname(out_path))
     pickle.dump(scaler, open(out_path, 'wb'))
 
@@ -434,7 +487,9 @@ if __name__ == '__main__':
     parser_create_mixture_csv.add_argument('--speech_dir', type=str, required=True)
     parser_create_mixture_csv.add_argument('--noise_dir', type=str, required=True)
     parser_create_mixture_csv.add_argument('--data_type', type=str, required=True)
+    parser_create_mixture_csv.add_argument('--speech_percent', type=int, default=100)
     parser_create_mixture_csv.add_argument('--magnification', type=int, default=1)
+    parser_create_mixture_csv.add_argument('--force', action='store_true')
 
     parser_calculate_mixture_features = subparsers.add_parser('calculate_mixture_features')
     parser_calculate_mixture_features.add_argument('--workspace', type=str, required=True)
@@ -442,18 +497,21 @@ if __name__ == '__main__':
     parser_calculate_mixture_features.add_argument('--noise_dir', type=str, required=True)
     parser_calculate_mixture_features.add_argument('--data_type', type=str, required=True)
     parser_calculate_mixture_features.add_argument('--snr', type=float, required=True)
-
+    parser_calculate_mixture_features.add_argument('--force', action='store_true')
+    
     parser_pack_features = subparsers.add_parser('pack_features')
     parser_pack_features.add_argument('--workspace', type=str, required=True)
     parser_pack_features.add_argument('--data_type', type=str, required=True)
     parser_pack_features.add_argument('--snr', type=float, required=True)
     parser_pack_features.add_argument('--n_concat', type=int, required=True)
     parser_pack_features.add_argument('--n_hop', type=int, required=True)
+    parser_pack_features.add_argument('--force', action='store_true')
 
     parser_compute_scaler = subparsers.add_parser('compute_scaler')
     parser_compute_scaler.add_argument('--workspace', type=str, required=True)
     parser_compute_scaler.add_argument('--data_type', type=str, required=True)
     parser_compute_scaler.add_argument('--snr', type=float, required=True)
+    parser_compute_scaler.add_argument('--force', action='store_true')
 
     args = parser.parse_args()
     if args.mode == 'create_mixture_csv':

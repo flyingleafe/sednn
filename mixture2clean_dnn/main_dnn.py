@@ -15,9 +15,12 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import prepare_data as pp_data
 import config as cfg
+from pathlib import PurePath
+from tqdm import tqdm
 
 from data_generator import DataGenerator
 from spectrogram_to_wave import recover_wav
+from utils import all_file_paths
 
 from tensorflow.keras import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Flatten
@@ -64,8 +67,22 @@ def train(args):
     workspace = args.workspace
     tr_snr = args.tr_snr
     te_snr = args.te_snr
+    force = args.force
     lr = args.lr
 
+    
+    # Directories for saving models and training stats
+    model_dir = os.path.join(workspace, "models", "%ddb" % int(tr_snr))
+    pp_data.create_folder(model_dir)
+
+    stats_dir = os.path.join(workspace, "training_stats", "%ddb" % int(tr_snr))
+    pp_data.create_folder(stats_dir)
+    
+    model_path = os.path.join(model_dir, "md_10000iters.h5")
+    if os.path.isfile(model_path) and not force:
+        print(f'Model already trained ({model_path})')
+        return
+    
     # Load data.
     t1 = time.time()
     tr_hdf5_path = os.path.join(workspace, "packed_features", "spectrogram", "train", "%ddb" % int(tr_snr), "data.h5")
@@ -96,6 +113,8 @@ def train(args):
         plt.show()
         pause
 
+    print(tf.test.is_gpu_available())
+
     # Build model
     (_, n_concat, n_freq) = tr_x.shape
     n_hid = 2048
@@ -119,13 +138,6 @@ def train(args):
     eval_te_gen = DataGenerator(batch_size=batch_size, type='test', te_max_iter=100)
     eval_tr_gen = DataGenerator(batch_size=batch_size, type='test', te_max_iter=100)
 
-    # Directories for saving models and training stats
-    model_dir = os.path.join(workspace, "models", "%ddb" % int(tr_snr))
-    pp_data.create_folder(model_dir)
-
-    stats_dir = os.path.join(workspace, "training_stats", "%ddb" % int(tr_snr))
-    pp_data.create_folder(stats_dir)
-
     # Print loss before training.
     iter = 0
     tr_loss = eval(model, eval_tr_gen, tr_x, tr_y)
@@ -142,7 +154,7 @@ def train(args):
     # Train.
     t1 = time.time()
     for (batch_x, batch_y) in tr_gen.generate(xs=[tr_x], ys=[tr_y]):
-        loss = model.train_on_batch(batch_x, batch_y)
+        loss = model.train_on_batch(batch_x , batch_y)
         iter += 1
 
         # Validate and save training stats.
@@ -186,6 +198,7 @@ def inference(args):
     tr_snr = args.tr_snr
     te_snr = args.te_snr
     n_concat = args.n_concat
+    force = args.force
     iter = args.iteration
 
     n_window = cfg.n_window
@@ -203,11 +216,17 @@ def inference(args):
 
     # Load test data.
     feat_dir = os.path.join(workspace, "features", "spectrogram", "test", "%ddb" % int(te_snr))
-    names = os.listdir(feat_dir)
+    feat_paths = all_file_paths(feat_dir)
 
-    for (cnt, na) in enumerate(names):
+    for (cnt, feat_path) in tqdm(enumerate(feat_paths), 'Inference (creating enhanced speech)'):
+        # Check if the enhanced audio is already inferred
+        na = str(PurePath(feat_path).relative_to(feat_dir).with_suffix(''))
+        out_path = os.path.join(workspace, "enh_wavs", "test", "%ddb" % int(te_snr), "%s.enh.wav" % na)
+        if os.path.isfile(out_path) and not force:
+            print(f'Enhanced audio {out_path} is already made')
+            continue
+        
         # Load feature.
-        feat_path = os.path.join(feat_dir, na)
         data = pickle.load(open(feat_path, 'rb'))
         [mixed_cmplx_x, speech_x, noise_x, alpha, na] = data
         mixed_x = np.abs(mixed_cmplx_x)
@@ -228,7 +247,7 @@ def inference(args):
 
         # Predict.
         pred = model.predict(mixed_x_3d)
-        print(cnt, na)
+        #print(cnt, na)
 
         # Inverse scale.
         if scale:
@@ -257,7 +276,6 @@ def inference(args):
                                                         # change after spectrogram and IFFT.
 
         # Write out enhanced wav.
-        out_path = os.path.join(workspace, "enh_wavs", "test", "%ddb" % int(te_snr), "%s.enh.wav" % na)
         pp_data.create_folder(os.path.dirname(out_path))
         pp_data.write_audio(out_path, s, fs)
 
@@ -271,6 +289,7 @@ if __name__ == '__main__':
     parser_train.add_argument('--tr_snr', type=float, required=True)
     parser_train.add_argument('--te_snr', type=float, required=True)
     parser_train.add_argument('--lr', type=float, required=True)
+    parser_train.add_argument('--force', action='store_true')
 
     parser_inference = subparsers.add_parser('inference')
     parser_inference.add_argument('--workspace', type=str, required=True)
@@ -279,6 +298,7 @@ if __name__ == '__main__':
     parser_inference.add_argument('--n_concat', type=int, required=True)
     parser_inference.add_argument('--iteration', type=int, required=True)
     parser_inference.add_argument('--visualize', action='store_true', default=False)
+    parser_inference.add_argument('--force', action='store_true')
 
     parser_calculate_pesq = subparsers.add_parser('calculate_pesq')
     parser_calculate_pesq.add_argument('--workspace', type=str, required=True)

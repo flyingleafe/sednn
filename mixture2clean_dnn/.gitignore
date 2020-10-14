@@ -1,6 +1,8 @@
 __pycache__
+.ipynb_checkpoints
 pythonenv
 workspace
+workspace_full
 pesq_dir
 pesq
 *.pyc

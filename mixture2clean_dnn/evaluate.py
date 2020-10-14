@@ -14,6 +14,10 @@ import pickle
 import matplotlib.pyplot as plt
 
 from pypesq import pesq
+from pathlib import PurePath
+from tqdm import tqdm
+
+from utils import all_file_paths
 
 def plot_training_stat(args):
     """Plot training and testing loss.
@@ -64,18 +68,25 @@ def calculate_pesq(args):
     workspace = args.workspace
     speech_dir = args.speech_dir
     te_snr = args.te_snr
-
+    force = args.force
+    
+    results_file = os.path.join(workspace, 'evaluation', 'pesq_results.csv')
+    if os.path.isfile(results_file) and not force:
+        print('PESQ is already calculated')
+        return
+    
     df = pd.DataFrame(columns=['filepath', 'pesq'])
 
     # Calculate PESQ of all enhaced speech.
     enh_speech_dir = os.path.join(workspace, "enh_wavs", "test", "%ddb" % int(te_snr))
-    names = os.listdir(enh_speech_dir)
-    for (cnt, na) in enumerate(names):
-        print(cnt, na)
-        enh_path = os.path.join(enh_speech_dir, na)
-
-        speech_na = na.split('.')[0]
-        speech_path = os.path.join(speech_dir, "%s.WAV" % speech_na)
+    enh_paths = all_file_paths(enh_speech_dir)
+    for (cnt, enh_path) in tqdm(enumerate(enh_paths), 'Calculating PESQ score'):
+        # enh_path = os.path.join(enh_speech_dir, na)
+        na = str(PurePath(enh_path).relative_to(enh_speech_dir))
+        #print(cnt, na)
+        
+        speech_na = '.'.join(na.split('.')[:-3])
+        speech_path = os.path.join(speech_dir, f"{speech_na}.wav")
 
         ref, sr = sf.read(speech_path)
         deg, sr = sf.read(enh_path)
@@ -90,18 +101,19 @@ def calculate_pesq(args):
 
         df.loc[len(df)] = [na, score]
 
-    df.to_csv('_pesq_results.csv', index=False)
+    os.makedirs(os.path.dirname(results_file), exist_ok=True)
+    df.to_csv(results_file, index=False)
 
 def get_stats(args):
     """Calculate stats of PESQ.
     """
-    df = pd.read_csv('_pesq_results.csv')
+    df = pd.read_csv(os.path.join(args.workspace, 'evaluation', 'pesq_results.csv'))
 
     pesq_dict = {}
     for idx, row in df.iterrows():
         na = row[0]
         pesq = float(row[1])
-        noise_type = na.split('.')[1]
+        noise_type = na.split('.')[-3]
         if noise_type not in pesq_dict.keys():
             pesq_dict[noise_type] = [pesq]
         else:
@@ -137,8 +149,10 @@ if __name__ == '__main__':
     parser_calculate_pesq.add_argument('--workspace', type=str, required=True)
     parser_calculate_pesq.add_argument('--speech_dir', type=str, required=True)
     parser_calculate_pesq.add_argument('--te_snr', type=float, required=True)
+    parser_calculate_pesq.add_argument('--force', action='store_true')
 
     parser_get_stats = subparsers.add_parser('get_stats')
+    parser_get_stats.add_argument('--workspace', type=str, required=True)
 
     args = parser.parse_args()
 
