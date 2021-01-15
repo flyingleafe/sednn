@@ -8,7 +8,7 @@ import numpy as np
 import numpy
 import decimal
 
-def recover_wav(pd_abs_x, gt_x, n_overlap, winfunc, wav_len=None):
+def recover_wav(pd_abs_x, gt_x, n_overlap, winfunc, wav_len=None, irr_mask=False):
     """Recover wave from spectrogram.
     If you are using scipy.signal.spectrogram, you may need to multipy a scaler
     to the recovered audio after using this function. For example,
@@ -24,8 +24,15 @@ def recover_wav(pd_abs_x, gt_x, n_overlap, winfunc, wav_len=None):
     Returns:
       1d array.
     """
-    x = real_to_complex(pd_abs_x, gt_x)
+    
+    if irr_mask:
+        x = pd_abs_x * np.abs(gt_x)
+    else:
+        x = pd_abs_x
+    
+    x = real_to_complex(x, gt_x)
     x = half_to_whole(x)
+    
     frames = ifft_to_wav(x)
     (n_frames, n_window) = frames.shape
     s = deframesig(frames=frames, siglen=0, frame_len=n_window,

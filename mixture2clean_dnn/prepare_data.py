@@ -43,7 +43,8 @@ def write_audio(path, audio, sample_rate):
 
     
 ###
-def create_mixture_csv(args):
+def create_mixture_csv(workspace, speech_dir, noise_dir, data_type,
+                       speech_percent, magnification, force=False):
     """Create csv containing mixture information.
     Each line in the .csv file contains [speech_name, noise_name, noise_onset, noise_offset]
 
@@ -57,13 +58,6 @@ def create_mixture_csv(args):
           speech with create 4620*3 mixtures. magnification should not larger
           than the species of noises.
     """
-    workspace = args.workspace
-    speech_dir = args.speech_dir
-    noise_dir = args.noise_dir
-    data_type = args.data_type
-    speech_percent = args.speech_percent
-    magnification = args.magnification
-    force = args.force
     fs = cfg.sample_rate
 
     out_csv_path = os.path.join(workspace, "mixture_csvs", "%s.csv" % data_type)
@@ -123,23 +117,18 @@ def create_mixture_csv(args):
     print("Create %s mixture csv finished!" % data_type)
 
 ###
-def calculate_mixture_features(args):
+def calculate_mixture_features(workspace, speech_dir, noise_dir, data_type,
+                               snr, force=False):
     """Calculate spectrogram for mixed, speech and noise audio. Then write the
     features to disk.
 
     Args:
-      workspace: str, path of workspace.
+      workspace: str, pa/asteroid/asteroid/4th of workspace.
       speech_dir: str, path of speech data.
       noise_dir: str, path of noise data.
       data_type: str, 'train' | 'test'.
       snr: float, signal to noise ratio to be mixed.
     """
-    workspace = args.workspace
-    speech_dir = args.speech_dir
-    noise_dir = args.noise_dir
-    data_type = args.data_type
-    snr = args.snr
-    force = args.force
     fs = cfg.sample_rate
 
     # Open mixture csv.
@@ -202,9 +191,12 @@ def calculate_mixture_features(args):
             print("onset {}, offset {}".format(noise_onset, noise_offset))
             raise ValueError("Stupid lenghts!")
             
-        # Scale speech to given snr.
-        scaler = get_amplitude_scaling_factor(speech_audio, noise_audio, snr=snr)
-        speech_audio *= scaler
+        clean_rms = cal_rms(speech_audio)
+        noise_rms = cal_rms(noise_audio)
+        adjusted_noise_rms = cal_adjusted_rms(clean_rms, snr)
+        
+        # Scale noise to given snr
+        noise_audio = noise_audio * (adjusted_noise_rms / noise_rms)
 
         # Get normalized mixture, speech, noise.
         (mixed_audio, speech_audio, noise_audio, alpha) = additive_mixing(speech_audio, noise_audio)
@@ -217,33 +209,20 @@ def calculate_mixture_features(args):
         mixed_complx_x = calc_sp(mixed_audio, mode='complex')
         speech_x = calc_sp(speech_audio, mode='magnitude')
         noise_x = calc_sp(noise_audio, mode='magnitude')
+        ir_mask = np.minimum(speech_x / np.abs(mixed_complx_x), 1)
 
         # Write out features.
         create_folder(os.path.dirname(out_feat_path))
-        data = [mixed_complx_x, speech_x, noise_x, alpha, out_bare_na]
+        data = [mixed_complx_x, speech_x, noise_x, ir_mask, alpha, out_bare_na]
         pickle.dump(data, open(out_feat_path, 'wb'), protocol=pickle.HIGHEST_PROTOCOL)
 
-def rms(y):
-    """Root mean square.
-    """
-    return np.sqrt(np.mean(np.abs(y) ** 2, axis=0, keepdims=False))
+def cal_adjusted_rms(clean_rms, snr):
+    a = float(snr) / 20
+    noise_rms = clean_rms / (10 ** a)
+    return noise_rms
 
-def get_amplitude_scaling_factor(s, n, snr, method='rms'):
-    """Given s and n, return the scaler s according to the snr.
-
-    Args:
-      s: ndarray, source1.
-      n: ndarray, source2.
-      snr: float, SNR.
-      method: 'rms'.
-
-    Outputs:
-      float, scaler.
-    """
-    original_sn_rms_ratio = rms(s) / rms(n)
-    target_sn_rms_ratio =  10. ** (float(snr) / 20.)    # snr = 20 * lg(rms(s) / rms(n))
-    signal_scaling_factor = target_sn_rms_ratio / original_sn_rms_ratio
-    return signal_scaling_factor
+def cal_rms(amp):
+    return np.sqrt(np.mean(np.square(amp), axis=-1))
 
 def additive_mixing(s, n):
     """Mix normalized source1 and source2.
@@ -258,13 +237,19 @@ def additive_mixing(s, n):
       n: ndarray, scaled source2.
       alpha: float, normalize coefficient.
     """
-    mixed_audio = s + n
+    mixed_amp = s + n
+    alpha = 1.0
+    
+    if mixed_amp.max(axis=0) > 1 or mixed_amp.min(axis=0) < -1:
+        if mixed_amp.max(axis=0) >= abs(mixed_amp.min(axis=0)):
+            alpha = 1. / mixed_amp.max(axis=0)
+        else:
+            alpha = -1. / mixed_amp.min(axis=0)
+        mixed_amp = mixed_amp * alpha
+        s *= alpha
+        n *= alpha
 
-    alpha = 1. / np.max(np.abs(mixed_audio))
-    mixed_audio *= alpha
-    s *= alpha
-    n *= alpha
-    return mixed_audio, s, n, alpha
+    return mixed_amp, s, n, alpha
 
 def calc_sp(audio, mode):
     """Calculate spectrogram.
@@ -297,7 +282,8 @@ def calc_sp(audio, mode):
     return x
 
 ###
-def pack_features(args):
+def pack_features(workspace, data_type, snr, n_concat,
+                  n_hop, force=False):
     """Load all features, apply log and conver to 3D tensor, write out to .h5 file.
 
     Args:
@@ -307,13 +293,7 @@ def pack_features(args):
       n_concat: int, number of frames to be concatenated.
       n_hop: int, hop frames.
     """
-    workspace = args.workspace
-    data_type = args.data_type
-    snr = args.snr
-    n_concat = args.n_concat
-    n_hop = args.n_hop
-    force = args.force
-
+    
     out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "data.h5")
     if os.path.isfile(out_path) and not force:
         print(f'Packed features file {out_path} is already made')
@@ -332,7 +312,7 @@ def pack_features(args):
     n_segs = 0
     for feat_path in tqdm(feat_paths, 'Reading features first time (segments lenghts estimation)'):
         data = pickle.load(open(feat_path, 'rb'))
-        [mixed_complx_x, _, _, _, _] = data
+        [mixed_complx_x, _, _, _, _, _] = data
         sgs = (mixed_complx_x.shape[0] + n_concat - 1) // n_hop
         n_segs += sgs
         
@@ -347,13 +327,16 @@ def pack_features(args):
         # Load feature.
         na = str(PurePath(feat_path).relative_to(feat_dir))
         data = pickle.load(open(feat_path, 'rb'))
-        [mixed_complx_x, speech_x, noise_x, alpha, na] = data
+        [mixed_complx_x, speech_x, noise_x, ir_mask, alpha, na] = data
         mixed_x = np.abs(mixed_complx_x)
 
         # Pad start and finish of the spectrogram with border values.
         n_pad = (n_concat - 1) // 2
         mixed_x = pad_with_border(mixed_x, n_pad)
-        speech_x = pad_with_border(speech_x, n_pad)
+        
+        # For training, we pack ideal ratio masks
+        # speech_x = pad_with_border(speech_x, n_pad)
+        ir_mask = pad_with_border(ir_mask, n_pad)
 
         # Cut input spectrogram to 3D segments with n_concat.
         mixed_x_3d = mat_2d_to_3d(mixed_x, agg_num=n_concat, hop=n_hop)
@@ -361,9 +344,9 @@ def pack_features(args):
         x_all[count_segs:count_segs+len(x), :, :] = x
 
         # Cut target spectrogram and take the center frame of each 3D segment.
-        speech_x_3d = mat_2d_to_3d(speech_x, agg_num=n_concat, hop=n_hop)
-        y = speech_x_3d[:, n_pad, :]
-        y = log_sp(y).astype(np.float32)
+        ir_mask_3d = mat_2d_to_3d(ir_mask, agg_num=n_concat, hop=n_hop)
+        y = ir_mask_3d[:, n_pad, :].astype(np.float32)
+        #y = log_sp(y).astype(np.float32)
         y_all[count_segs:count_segs+len(y), :] = y
 
         assert len(x) == len(y)
@@ -381,8 +364,10 @@ def pack_features(args):
     print("Write out to %s" % out_path)
     print("Pack features finished! %s s" % (time.time() - t1,))
 
+
 def log_sp(x):
     return np.log(x + 1e-08)
+
 
 def mat_2d_to_3d(x, agg_num, hop):
     """Segment 2D array to 3D segments.
@@ -401,6 +386,7 @@ def mat_2d_to_3d(x, agg_num, hop):
         i1 += hop
     return np.array(x3d)
 
+
 def pad_with_border(x, n_pad):
     """Pad the begin and finish of spectrogram with border frame value.
     """
@@ -408,13 +394,9 @@ def pad_with_border(x, n_pad):
     return np.pad(x, ((n_pad, n_pad), (0, 0)), mode='edge')
     
 
-def compute_scaler(args):
+def compute_scaler(workspace, data_type, snr, force=False):
     """Compute and write out scaler of data.
     """
-    workspace = args.workspace
-    data_type = args.data_type
-    force = args.force
-    snr = args.snr
 
     # Check if already computed
     out_path = os.path.join(workspace, "packed_features", "spectrogram", data_type, "%ddb" % int(snr), "scaler.p")
@@ -444,6 +426,31 @@ def compute_scaler(args):
     print("Save scaler to %s" % out_path)
     print("Compute scaler finished! %s s" % (time.time() - t1,))
 
+    
+def combine_scalers(sc1, sc2):
+    """
+    Combines scalers for two subsets of data
+    """
+    assert sc1.n_features_in_ == sc2.n_features_in_
+    
+    N = sc1.n_samples_seen_ + sc2.n_samples_seen_
+    mean = (sc1.mean_ * sc1.n_samples_seen_ + sc2.mean_ * sc2.n_samples_seen_) / N
+    
+    squares_sum1 = (sc1.var_ + sc1.mean_**2) * sc1.n_samples_seen_
+    squares_sum2 = (sc2.var_ + sc2.mean_**2) * sc2.n_samples_seen_
+    var = (squares_sum1 + squares_sum2) / N - mean**2
+    
+    std = np.sqrt(var)
+    new_scaler = preprocessing.StandardScaler()
+    new_scaler.mean_ = mean
+    new_scaler.var_ = var
+    new_scaler.scale_ = std
+    new_scaler.n_samples_seen_ = N
+    new_scaler.n_features_in_ = sc1.n_features_in_
+    
+    return new_scaler
+    
+    
 def scale_on_2d(x2d, scaler):
     """Scale 2D array data.
     """
@@ -514,13 +521,16 @@ if __name__ == '__main__':
     parser_compute_scaler.add_argument('--force', action='store_true')
 
     args = parser.parse_args()
+    kwargs = vars(args).copy()
+    del kwargs['mode']
+    
     if args.mode == 'create_mixture_csv':
-        create_mixture_csv(args)
+        create_mixture_csv(**kwargs)
     elif args.mode == 'calculate_mixture_features':
-        calculate_mixture_features(args)
+        calculate_mixture_features(**kwargs)
     elif args.mode == 'pack_features':
-        pack_features(args)
+        pack_features(**kwargs)
     elif args.mode == 'compute_scaler':
-        compute_scaler(args)
+        compute_scaler(**kwargs)
     else:
         raise Exception("Error!")
