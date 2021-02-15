@@ -17,20 +17,20 @@ if [ $MINIDATA -eq 1 ]; then
   TEST_SPEECH_PERCENT=100
   echo "Using mini data. "
 else
-  WORKSPACE="/import/vision-eddydata/dm005_tmp"
-  TR_SPEECH_DIR="$HOME/datasets/TIMIT/data/TRAIN"
-  TR_NOISE_DIR="$HOME/datasets/noises-train"
-  TE_SPEECH_DIR="$HOME/datasets/TIMIT/data/TEST"
-  TE_NOISE_DIR="$HOME/datasets/noises-test-drones"
+  WORKSPACE="/import/vision-eddydata/dm005_tmp/workspace_8kHz"
+  TR_SPEECH_DIR="/import/vision-eddydata/dm005_tmp/TIMIT_8kHZ/data/TRAIN"
+  TR_NOISE_DIR="$HOME/datasets/noises-train-drones-8khz"
+  TE_SPEECH_DIR="/import/vision-eddydata/dm005_tmp/TIMIT_8kHZ/data/TEST"
+  TE_NOISE_DIR="$HOME/datasets/noises-test-drones-8khz"
   TEST_SPEECH_PERCENT=100
   echo "Using full data. "
 fi
 
 # Create mixture csv.
-python prepare_data.py create_mixture_csv --workspace=$WORKSPACE --speech_dir=$TR_SPEECH_DIR --noise_dir=$TR_NOISE_DIR --data_type=train --magnification=2 $FORCE
+python prepare_data.py create_mixture_csv --workspace=$WORKSPACE --speech_dir=$TR_SPEECH_DIR --noise_dir=$TR_NOISE_DIR --data_type=train --magnification=5 $FORCE
 python prepare_data.py create_mixture_csv --workspace=$WORKSPACE --speech_dir=$TE_SPEECH_DIR --noise_dir=$TE_NOISE_DIR --data_type=test --speech_percent=$TEST_SPEECH_PERCENT $FORCE
 
-TR_SNRs=( -25 -20 -15 -10 -5 0 5 10 15 )
+TR_SNRs=( -25 -20 -15 -10 -5 )
 TE_SNRs=( -30 -25 -20 -15 -10 -5 0 )
 
 N_CONCAT=7
